@@ -1,0 +1,4 @@
+python-jobspy
+pandas
+google-genai
+python-dotenv
