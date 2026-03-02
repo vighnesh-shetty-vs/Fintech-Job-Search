@@ -20,9 +20,6 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# ==========================================
-# EXPANDED SEARCH PARAMETERS
-# ==========================================
 SEARCH_TERMS = [
     "Data Analyst Intern", 
     "Quantitative Developer Internship", 
@@ -31,7 +28,6 @@ SEARCH_TERMS = [
     "Data Science Working Student"
 ]
 
-# FIX: JobSpy requires strictly lowercase country names
 LOCATIONS = [
     {"city": "Paris", "country": "france", "needs_sponsorship": False},
     {"city": "Amsterdam", "country": "netherlands", "needs_sponsorship": True},
@@ -47,7 +43,6 @@ def fetch_jobs():
         for loc in LOCATIONS:
             print(f"Scraping {term} in {loc['city']}...")
             try:
-                # FIX: Removed ZipRecruiter and Glassdoor to prevent Cloudflare 403 WAF blocks on GitHub Actions
                 jobs = scrape_jobs(
                     site_name=["linkedin", "indeed"], 
                     search_term=term,
@@ -67,24 +62,40 @@ def fetch_jobs():
     if not all_jobs:
         return pd.DataFrame()
         
-    # FIX: Suppress future warnings by ensuring clean concatenation
     df = pd.concat(all_jobs, ignore_index=True)
     df = df.drop_duplicates(subset=['job_url'])
     return df
 
 def apply_hard_filters(df):
+    """Filters by applicant count and local keyword matching to save API quota."""
+    # 1. Filter by applicant count
     if 'emails_count' in df.columns:
         df = df[(df['emails_count'] < 10) | (df['emails_count'].isna())]
-    return df
+        
+    # 2. Local Pre-Filter (The Quota Saver)
+    print("Applying local keyword pre-filter...")
+    
+    titles = df['title'].str.lower()
+    descs = df['description'].str.lower()
+    companies = df['company'].str.lower()
+    
+    # Must contain at least one internship-related word
+    intern_kws = ['intern', 'stage', 'student', 'co-op', 'apprentice', 'alternance']
+    has_intern = titles.str.contains('|'.join(intern_kws), na=False) | descs.str.contains('|'.join(intern_kws), na=False)
+    
+    # Must contain at least one finance-related word
+    fin_kws = ['fintech', 'bank', 'financ', 'payment', 'trading', 'quant', 'risk', 'credit', 'wealth', 'asset', 'capital', 'market']
+    has_fin = companies.str.contains('|'.join(fin_kws), na=False) | descs.str.contains('|'.join(fin_kws), na=False)
+    
+    df_filtered = df[has_intern & has_fin].copy()
+    print(f"Local filter reduced jobs from {len(df)} to {len(df_filtered)}.")
+    return df_filtered
 
 def batch_ai_evaluate(df):
-    """
-    Evaluates jobs in batches of 15 to completely bypass Gemini API Rate Limits.
-    """
+    """Evaluates jobs in large mega-batches to minimize daily API requests."""
     valid_indices = []
-    batch_size = 15 
+    batch_size = 45 # Mega-batching to drastically reduce total requests
     
-    # Iterate over the dataframe in chunks
     for i in range(0, len(df), batch_size):
         batch_df = df.iloc[i:i+batch_size]
         
@@ -101,7 +112,7 @@ def batch_ai_evaluate(df):
                 "title": row.get('title', ''),
                 "company": row.get('company', ''),
                 "needs_sponsorship": row.get('needs_sponsorship', False),
-                "description": str(row.get('description', ''))[:800] # Truncated to speed up AI processing
+                "description": str(row.get('description', ''))[:600] # Kept shorter to fit 45 jobs in context
             })
             
         prompt += json.dumps(jobs_to_evaluate)
@@ -110,21 +121,21 @@ def batch_ai_evaluate(df):
             response = client.models.generate_content(
                 model='gemini-2.5-flash-lite',
                 contents=prompt,
-                config={"temperature": 0.0} # Absolute 0 ensures strictly factual JSON output
+                config={"temperature": 0.0} 
             )
             
-            # Clean up the response safely 
             result_text = response.text.strip().replace('```json', '').replace('```', '')
             passed_ids = json.loads(result_text)
             valid_indices.extend(passed_ids)
+            print(f"Batch {i//batch_size + 1} processed successfully.")
             
         except Exception as e:
             print(f"Batch AI Error on chunk {i//batch_size + 1}: {e}")
             
-        print(f"Processed batch {i//batch_size + 1}/{(len(df)//batch_size) + 1}. Pausing 12s to respect API RPM limits...")
-        time.sleep(12) # Guarantees a maximum of 5 requests per minute, well under the limit.
+        # Only sleep if there are more batches to process
+        if i + batch_size < len(df):
+            time.sleep(15)
 
-    # Reconstruct the final dataframe based on the matched indices
     final_indices = []
     for v_id in valid_indices:
         try:
@@ -207,6 +218,6 @@ if __name__ == "__main__":
             print(f"{len(final_jobs)} jobs passed all AI checks.")
             send_email(final_jobs)
         else:
-            print("No jobs passed the applicant count filter today.")
+            print("No jobs passed the local filters today.")
     else:
         print("No jobs scraped today.")
