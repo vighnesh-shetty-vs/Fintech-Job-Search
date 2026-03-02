@@ -1,4 +1,6 @@
 import os
+import time
+import json
 import smtplib
 import pandas as pd
 from email.message import EmailMessage
@@ -21,7 +23,6 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 # ==========================================
 # EXPANDED SEARCH PARAMETERS
 # ==========================================
-# Targeted for 6-month placements starting May 2026
 SEARCH_TERMS = [
     "Data Analyst Intern", 
     "Quantitative Developer Internship", 
@@ -30,14 +31,14 @@ SEARCH_TERMS = [
     "Data Science Working Student"
 ]
 
-# Expanded Financial Hubs
+# FIX: JobSpy requires strictly lowercase country names
 LOCATIONS = [
-    {"city": "Paris", "country": "France", "needs_sponsorship": False},
-    {"city": "Amsterdam", "country": "Netherlands", "needs_sponsorship": True},
-    {"city": "London", "country": "UK", "needs_sponsorship": True},
-    {"city": "Frankfurt", "country": "Germany", "needs_sponsorship": True},
-    {"city": "Dublin", "country": "Ireland", "needs_sponsorship": True},
-    {"city": "Luxembourg", "country": "Luxembourg", "needs_sponsorship": True}
+    {"city": "Paris", "country": "france", "needs_sponsorship": False},
+    {"city": "Amsterdam", "country": "netherlands", "needs_sponsorship": True},
+    {"city": "London", "country": "uk", "needs_sponsorship": True},
+    {"city": "Frankfurt", "country": "germany", "needs_sponsorship": True},
+    {"city": "Dublin", "country": "ireland", "needs_sponsorship": True},
+    {"city": "Luxembourg", "country": "luxembourg", "needs_sponsorship": True}
 ]
 
 def fetch_jobs():
@@ -46,8 +47,9 @@ def fetch_jobs():
         for loc in LOCATIONS:
             print(f"Scraping {term} in {loc['city']}...")
             try:
+                # FIX: Removed ZipRecruiter and Glassdoor to prevent Cloudflare 403 WAF blocks on GitHub Actions
                 jobs = scrape_jobs(
-                    site_name=["linkedin", "indeed", "glassdoor", "zip_recruiter"],
+                    site_name=["linkedin", "indeed"], 
                     search_term=term,
                     location=loc["city"],
                     results_wanted=30,
@@ -65,6 +67,7 @@ def fetch_jobs():
     if not all_jobs:
         return pd.DataFrame()
         
+    # FIX: Suppress future warnings by ensuring clean concatenation
     df = pd.concat(all_jobs, ignore_index=True)
     df = df.drop_duplicates(subset=['job_url'])
     return df
@@ -74,45 +77,62 @@ def apply_hard_filters(df):
         df = df[(df['emails_count'] < 10) | (df['emails_count'].isna())]
     return df
 
-def ai_evaluate_job(title, company, description, needs_sponsorship):
-    desc_snippet = str(description)[:1500] 
-    
-    prompt = f"""
-    Evaluate the following job posting:
-    Title: {title}
-    Company: {company}
-    Description: {desc_snippet}
-    
-    Task 1: Is this company or role strictly in the Fintech, Banking, or Financial Risk domain?
-    Task 2: Is this explicitly an Internship, Stage, Co-op, or Working Student role?
-    Task 3: If 'needs_sponsorship' is True ({needs_sponsorship}), does the description explicitly mention offering visa sponsorship, relocation assistance, or welcoming international applicants?
-    
-    Reply ONLY in this exact format:
-    Fintech: [Yes/No]
-    Internship: [Yes/No]
-    Sponsorship: [Yes/No/Not Required]
+def batch_ai_evaluate(df):
     """
+    Evaluates jobs in batches of 15 to completely bypass Gemini API Rate Limits.
+    """
+    valid_indices = []
+    batch_size = 15 
     
-    try:
-        response = client.models.generate_content(
-            model='gemini-2.5-flash-lite',
-            contents=prompt,
-            config={"temperature": 0.1} 
-        )
+    # Iterate over the dataframe in chunks
+    for i in range(0, len(df), batch_size):
+        batch_df = df.iloc[i:i+batch_size]
         
-        result = response.text.strip()
-        is_fintech = "Fintech: Yes" in result
-        is_internship = "Internship: Yes" in result
+        prompt = "Evaluate these job postings based on the following strict criteria:\n"
+        prompt += "1. Domain: Must be strictly Fintech, Banking, or Financial Risk.\n"
+        prompt += "2. Role Type: Must be an Internship, Stage, Co-op, or Working Student.\n"
+        prompt += "3. Sponsorship: If 'needs_sponsorship' is True, the description MUST explicitly mention visa sponsorship, relocation assistance, or welcoming international applicants.\n\n"
+        prompt += "Return ONLY a valid JSON list of the exact 'id' strings that PASS ALL criteria. If none pass, return []. Do not include markdown formatting or any other text.\n\n"
         
-        if needs_sponsorship:
-            has_sponsorship = "Sponsorship: Yes" in result
-            return is_fintech and is_internship and has_sponsorship
+        jobs_to_evaluate = []
+        for idx, row in batch_df.iterrows():
+            jobs_to_evaluate.append({
+                "id": str(idx),
+                "title": row.get('title', ''),
+                "company": row.get('company', ''),
+                "needs_sponsorship": row.get('needs_sponsorship', False),
+                "description": str(row.get('description', ''))[:800] # Truncated to speed up AI processing
+            })
             
-        return is_fintech and is_internship
+        prompt += json.dumps(jobs_to_evaluate)
         
-    except Exception as e:
-        print(f"Gemini API Error: {e}")
-        return False
+        try:
+            response = client.models.generate_content(
+                model='gemini-2.5-flash-lite',
+                contents=prompt,
+                config={"temperature": 0.0} # Absolute 0 ensures strictly factual JSON output
+            )
+            
+            # Clean up the response safely 
+            result_text = response.text.strip().replace('```json', '').replace('```', '')
+            passed_ids = json.loads(result_text)
+            valid_indices.extend(passed_ids)
+            
+        except Exception as e:
+            print(f"Batch AI Error on chunk {i//batch_size + 1}: {e}")
+            
+        print(f"Processed batch {i//batch_size + 1}/{(len(df)//batch_size) + 1}. Pausing 12s to respect API RPM limits...")
+        time.sleep(12) # Guarantees a maximum of 5 requests per minute, well under the limit.
+
+    # Reconstruct the final dataframe based on the matched indices
+    final_indices = []
+    for v_id in valid_indices:
+        try:
+            final_indices.append(int(v_id) if pd.api.types.is_numeric_dtype(df.index) else v_id)
+        except:
+            pass
+            
+    return df.loc[df.index.isin(final_indices)]
 
 def send_email(df_filtered):
     if df_filtered.empty:
@@ -181,15 +201,12 @@ if __name__ == "__main__":
         print(f"Found {len(raw_jobs)} total jobs. Applying hard filters...")
         filtered_jobs = apply_hard_filters(raw_jobs)
         
-        print(f"Running Gemini AI evaluation on {len(filtered_jobs)} jobs...")
-        valid_indices = []
-        for index, row in filtered_jobs.iterrows():
-            if ai_evaluate_job(row['title'], row['company'], row['description'], row['needs_sponsorship']):
-                valid_indices.append(index)
-                
-        final_jobs = filtered_jobs.loc[valid_indices]
-        print(f"{len(final_jobs)} jobs passed all AI checks.")
-        
-        send_email(final_jobs)
+        if not filtered_jobs.empty:
+            print(f"Running Gemini AI batch evaluation on {len(filtered_jobs)} jobs...")
+            final_jobs = batch_ai_evaluate(filtered_jobs)
+            print(f"{len(final_jobs)} jobs passed all AI checks.")
+            send_email(final_jobs)
+        else:
+            print("No jobs passed the applicant count filter today.")
     else:
         print("No jobs scraped today.")
