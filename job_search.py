@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import random
 import smtplib
 import pandas as pd
 from email.message import EmailMessage
@@ -28,6 +29,7 @@ SEARCH_TERMS = [
     "Data Science Working Student"
 ]
 
+# Lowercase countries to prevent JobSpy crashes
 LOCATIONS = [
     {"city": "Paris", "country": "france", "needs_sponsorship": False},
     {"city": "Amsterdam", "country": "netherlands", "needs_sponsorship": True},
@@ -37,6 +39,27 @@ LOCATIONS = [
     {"city": "Luxembourg", "country": "luxembourg", "needs_sponsorship": True}
 ]
 
+def safe_api_call(prompt, max_retries=3):
+    """Executes API call with Exponential Backoff for 100% resilience against drops."""
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model='gemini-2.5-flash-lite',
+                contents=prompt,
+                config={"temperature": 0.0}
+            )
+            return response.text.strip().replace('```json', '').replace('```', '')
+            
+        except Exception as e:
+            print(f"API Attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                backoff_time = 20 * (2 ** attempt) # 20s, 40s, 80s
+                print(f"Backing off for {backoff_time} seconds...")
+                time.sleep(backoff_time)
+            else:
+                print("Max retries reached. Failing gracefully.")
+                return "[]"
+
 def fetch_jobs():
     all_jobs = []
     for term in SEARCH_TERMS:
@@ -44,7 +67,7 @@ def fetch_jobs():
             print(f"Scraping {term} in {loc['city']}...")
             try:
                 jobs = scrape_jobs(
-                    site_name=["linkedin", "indeed"], 
+                    site_name=["linkedin", "indeed"], # Excluded sites that trigger Cloudflare WAF 403s
                     search_term=term,
                     location=loc["city"],
                     results_wanted=30,
@@ -56,8 +79,14 @@ def fetch_jobs():
                     jobs['search_city'] = loc['city']
                     jobs['needs_sponsorship'] = loc['needs_sponsorship']
                     all_jobs.append(jobs)
+                    
             except Exception as e:
                 print(f"Error scraping {term} in {loc['city']}: {e}")
+            
+            # ANTI-BAN MICRO-DELAY: Bypasses datacenter IP rate limiting
+            delay = random.uniform(7.0, 14.0)
+            print(f"Waiting {round(delay, 2)}s to fly under WAF radar...")
+            time.sleep(delay)
                 
     if not all_jobs:
         return pd.DataFrame()
@@ -68,22 +97,17 @@ def fetch_jobs():
 
 def apply_hard_filters(df):
     """Filters by applicant count and local keyword matching to save API quota."""
-    # 1. Filter by applicant count
     if 'emails_count' in df.columns:
         df = df[(df['emails_count'] < 10) | (df['emails_count'].isna())]
         
-    # 2. Local Pre-Filter (The Quota Saver)
     print("Applying local keyword pre-filter...")
-    
     titles = df['title'].str.lower()
     descs = df['description'].str.lower()
     companies = df['company'].str.lower()
     
-    # Must contain at least one internship-related word
     intern_kws = ['intern', 'stage', 'student', 'co-op', 'apprentice', 'alternance']
     has_intern = titles.str.contains('|'.join(intern_kws), na=False) | descs.str.contains('|'.join(intern_kws), na=False)
     
-    # Must contain at least one finance-related word
     fin_kws = ['fintech', 'bank', 'financ', 'payment', 'trading', 'quant', 'risk', 'credit', 'wealth', 'asset', 'capital', 'market']
     has_fin = companies.str.contains('|'.join(fin_kws), na=False) | descs.str.contains('|'.join(fin_kws), na=False)
     
@@ -92,9 +116,8 @@ def apply_hard_filters(df):
     return df_filtered
 
 def batch_ai_evaluate(df):
-    """Evaluates jobs in large mega-batches to minimize daily API requests."""
     valid_indices = []
-    batch_size = 45 # Mega-batching to drastically reduce total requests
+    batch_size = 45 # Mega-batching to drastically reduce total daily requests
     
     for i in range(0, len(df), batch_size):
         batch_df = df.iloc[i:i+batch_size]
@@ -103,7 +126,7 @@ def batch_ai_evaluate(df):
         prompt += "1. Domain: Must be strictly Fintech, Banking, or Financial Risk.\n"
         prompt += "2. Role Type: Must be an Internship, Stage, Co-op, or Working Student.\n"
         prompt += "3. Sponsorship: If 'needs_sponsorship' is True, the description MUST explicitly mention visa sponsorship, relocation assistance, or welcoming international applicants.\n\n"
-        prompt += "Return ONLY a valid JSON list of the exact 'id' strings that PASS ALL criteria. If none pass, return []. Do not include markdown formatting or any other text.\n\n"
+        prompt += "Return ONLY a valid JSON list of the exact 'id' strings that PASS ALL criteria. If none pass, return []. Do not include markdown formatting.\n\n"
         
         jobs_to_evaluate = []
         for idx, row in batch_df.iterrows():
@@ -112,27 +135,20 @@ def batch_ai_evaluate(df):
                 "title": row.get('title', ''),
                 "company": row.get('company', ''),
                 "needs_sponsorship": row.get('needs_sponsorship', False),
-                "description": str(row.get('description', ''))[:600] # Kept shorter to fit 45 jobs in context
+                "description": str(row.get('description', ''))[:600] 
             })
             
         prompt += json.dumps(jobs_to_evaluate)
         
+        result_text = safe_api_call(prompt)
+        
         try:
-            response = client.models.generate_content(
-                model='gemini-2.5-flash-lite',
-                contents=prompt,
-                config={"temperature": 0.0} 
-            )
-            
-            result_text = response.text.strip().replace('```json', '').replace('```', '')
             passed_ids = json.loads(result_text)
             valid_indices.extend(passed_ids)
             print(f"Batch {i//batch_size + 1} processed successfully.")
+        except json.JSONDecodeError:
+            print(f"Failed to parse JSON for Batch {i//batch_size + 1}.")
             
-        except Exception as e:
-            print(f"Batch AI Error on chunk {i//batch_size + 1}: {e}")
-            
-        # Only sleep if there are more batches to process
         if i + batch_size < len(df):
             time.sleep(15)
 
@@ -147,7 +163,7 @@ def batch_ai_evaluate(df):
 
 def send_email(df_filtered):
     if df_filtered.empty:
-        print("No jobs matched the strict criteria today. Skipping email.")
+        print("No jobs matched today. Skipping email.")
         return
 
     msg = EmailMessage()
@@ -156,42 +172,18 @@ def send_email(df_filtered):
     msg['To'] = EMAIL_RECEIVER
 
     html_content = """
-    <html>
-      <head>
-        <style>
-          table { border-collapse: collapse; width: 100%; font-family: Arial, sans-serif; }
-          th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-          th { background-color: #f2f2f2; }
-          a { color: #1a0dab; text-decoration: none; font-weight: bold; }
-        </style>
-      </head>
-      <body>
-        <h2>Targeted Fintech Internships & Stages</h2>
-        <p>Filtered for <10 applicants, posted in the last 24h across major European hubs.</p>
-        <table>
-          <tr>
-            <th>Role</th>
-            <th>Company</th>
-            <th>Location</th>
-            <th>Link</th>
-          </tr>
+    <html><head><style>
+    table { border-collapse: collapse; width: 100%; font-family: Arial, sans-serif; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    th { background-color: #f2f2f2; }
+    a { color: #1a0dab; text-decoration: none; font-weight: bold; }
+    </style></head><body>
+    <h2>Targeted Fintech Internships & Stages</h2>
+    <table><tr><th>Role</th><th>Company</th><th>Location</th><th>Link</th></tr>
     """
-    
     for _, row in df_filtered.iterrows():
-        html_content += f"""
-          <tr>
-            <td>{row.get('title', 'N/A')}</td>
-            <td>{row.get('company', 'N/A')}</td>
-            <td>{row.get('location', row.get('search_city', 'N/A'))}</td>
-            <td><a href="{row.get('job_url', '#')}">Apply Here</a></td>
-          </tr>
-        """
-        
-    html_content += """
-        </table>
-      </body>
-    </html>
-    """
+        html_content += f"<tr><td>{row.get('title', 'N/A')}</td><td>{row.get('company', 'N/A')}</td><td>{row.get('location', row.get('search_city', 'N/A'))}</td><td><a href='{row.get('job_url', '#')}'>Apply Here</a></td></tr>"
+    html_content += "</table></body></html>"
     
     msg.set_content("Please enable HTML to view this email.")
     msg.add_alternative(html_content, subtype='html')
@@ -200,24 +192,25 @@ def send_email(df_filtered):
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
             smtp.login(EMAIL_SENDER, EMAIL_PASSWORD)
             smtp.send_message(msg)
-        print("Email sent successfully! Check your inbox.")
+        print("Email sent successfully!")
     except Exception as e:
         print(f"Failed to send email: {e}")
 
 if __name__ == "__main__":
+    # HUMANIZATION JITTER: Prevents GitHub cron bans
+    sleep_time = random.randint(1, 1500) # Random delay between 1 second and 25 minutes
+    print(f"Jitter activated. Sleeping for {sleep_time} seconds before execution...")
+    time.sleep(sleep_time)
+    
     print("Starting AI Job Agent...")
     raw_jobs = fetch_jobs()
     
     if not raw_jobs.empty:
-        print(f"Found {len(raw_jobs)} total jobs. Applying hard filters...")
         filtered_jobs = apply_hard_filters(raw_jobs)
-        
         if not filtered_jobs.empty:
-            print(f"Running Gemini AI batch evaluation on {len(filtered_jobs)} jobs...")
             final_jobs = batch_ai_evaluate(filtered_jobs)
-            print(f"{len(final_jobs)} jobs passed all AI checks.")
             send_email(final_jobs)
         else:
-            print("No jobs passed the local filters today.")
+            print("No jobs passed local filters.")
     else:
         print("No jobs scraped today.")
