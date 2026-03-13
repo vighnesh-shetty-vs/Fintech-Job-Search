@@ -27,9 +27,7 @@ jobs:
     - name: Install Dependencies
       run: |
         python -m pip install --upgrade pip
-        # It is highly recommended to create a requirements.txt file in your repo.
-        # If you don't have one, this line acts as a fallback.
-        pip install pandas jobspy google-genai python-dotenv
+        pip install -r requirements.txt
 
     - name: Run AI Job Agent
       env:
