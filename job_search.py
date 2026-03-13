@@ -21,26 +21,44 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
+# Broadened categories leveraging both BI/Data and Backend/API experience
 SEARCH_TERMS = [
+    # Data & Analytics
     "Data Analyst Intern", 
-    "Quantitative Developer Internship", 
+    "Data Science Working Student",
+    "Business Intelligence Intern",
+    "BI Stage",
+    # Engineering & Backend
+    "Data Engineer Intern",
     "API Engineer Intern",
-    "Machine Learning Stage",
-    "Data Science Working Student"
+    "Backend Developer Intern",
+    # Finance/Quant
+    "Quantitative Developer Internship", 
+    "Risk Analyst Intern"
 ]
 
-# Lowercase countries to prevent JobSpy crashes
+# Expanded EU/Asia hubs. US/Canada implicitly ignored by omission, 
+# and explicitly filtered out in the hard filters below.
 LOCATIONS = [
+    # France (No sponsorship needed)
     {"city": "Paris", "country": "france", "needs_sponsorship": False},
+    {"city": "Lyon", "country": "france", "needs_sponsorship": False},
+    # EU Hubs
     {"city": "Amsterdam", "country": "netherlands", "needs_sponsorship": True},
     {"city": "London", "country": "uk", "needs_sponsorship": True},
     {"city": "Frankfurt", "country": "germany", "needs_sponsorship": True},
+    {"city": "Berlin", "country": "germany", "needs_sponsorship": True},
     {"city": "Dublin", "country": "ireland", "needs_sponsorship": True},
-    {"city": "Luxembourg", "country": "luxembourg", "needs_sponsorship": True}
+    {"city": "Luxembourg", "country": "luxembourg", "needs_sponsorship": True},
+    {"city": "Zurich", "country": "switzerland", "needs_sponsorship": True},
+    {"city": "Milan", "country": "italy", "needs_sponsorship": True},
+    # Asia Hubs
+    {"city": "Dubai", "country": "uae", "needs_sponsorship": True},
+    {"city": "Singapore", "country": "singapore", "needs_sponsorship": True}
 ]
 
 def safe_api_call(prompt, max_retries=3):
-    """Executes API call with Exponential Backoff for 100% resilience against drops."""
+    """Executes API call with Exponential Backoff to respect 15 RPM limits."""
     for attempt in range(max_retries):
         try:
             response = client.models.generate_content(
@@ -53,7 +71,7 @@ def safe_api_call(prompt, max_retries=3):
         except Exception as e:
             print(f"API Attempt {attempt + 1} failed: {e}")
             if attempt < max_retries - 1:
-                backoff_time = 20 * (2 ** attempt) # 20s, 40s, 80s
+                backoff_time = 20 * (2 ** attempt) 
                 print(f"Backing off for {backoff_time} seconds...")
                 time.sleep(backoff_time)
             else:
@@ -66,11 +84,12 @@ def fetch_jobs():
         for loc in LOCATIONS:
             print(f"Scraping {term} in {loc['city']}...")
             try:
+                # Added 'google' and 'glassdoor'. Google Jobs is highly resilient to datacenter IPs.
                 jobs = scrape_jobs(
-                    site_name=["linkedin", "indeed"], # Excluded sites that trigger Cloudflare WAF 403s
+                    site_name=["linkedin", "indeed", "glassdoor", "google"], 
                     search_term=term,
                     location=loc["city"],
-                    results_wanted=30,
+                    results_wanted=20, # Reduced slightly to avoid triggering anti-bot walls faster
                     hours_old=24, 
                     country_relevant=loc["country"]
                 )
@@ -83,9 +102,8 @@ def fetch_jobs():
             except Exception as e:
                 print(f"Error scraping {term} in {loc['city']}: {e}")
             
-            # ANTI-BAN MICRO-DELAY: Bypasses datacenter IP rate limiting
-            delay = random.uniform(7.0, 14.0)
-            print(f"Waiting {round(delay, 2)}s to fly under WAF radar...")
+            # ANTI-BAN MICRO-DELAY
+            delay = random.uniform(8.0, 16.0)
             time.sleep(delay)
                 
     if not all_jobs:
@@ -96,35 +114,48 @@ def fetch_jobs():
     return df
 
 def apply_hard_filters(df):
-    """Filters by applicant count and local keyword matching to save API quota."""
+    """Aggressive local filtering to save API quota and enforce constraints."""
     if 'emails_count' in df.columns:
         df = df[(df['emails_count'] < 10) | (df['emails_count'].isna())]
         
-    print("Applying local keyword pre-filter...")
-    titles = df['title'].str.lower()
-    descs = df['description'].str.lower()
-    companies = df['company'].str.lower()
+    titles = df['title'].astype(str).str.lower()
+    descs = df['description'].astype(str).str.lower()
+    locations = df['location'].astype(str).str.lower()
+    companies = df['company'].astype(str).str.lower()
     
-    intern_kws = ['intern', 'stage', 'student', 'co-op', 'apprentice', 'alternance']
+    # 1. Strict Exclusions (No USA/Canada)
+    na_kws = ['usa', 'united states', 'canada', 'ny ', 'ca ', 'tx ']
+    is_not_na = ~locations.str.contains('|'.join(na_kws), na=False)
+    
+    # 2. Intern/Stage Requirement
+    intern_kws = ['intern', 'stage', 'student', 'co-op', 'apprentice', 'alternance', 'graduate']
     has_intern = titles.str.contains('|'.join(intern_kws), na=False) | descs.str.contains('|'.join(intern_kws), na=False)
     
-    fin_kws = ['fintech', 'bank', 'financ', 'payment', 'trading', 'quant', 'risk', 'credit', 'wealth', 'asset', 'capital', 'market']
+    # 3. Local Sponsorship Pre-Filter (Saves API calls)
+    sponsorship_kws = ['visa', 'sponsor', 'relocat', 'international', 'global mobility', 'permit']
+    has_sponsorship_mention = descs.str.contains('|'.join(sponsorship_kws), na=False)
+    
+    # Keep if: It's France OR (It needs sponsorship AND mentions sponsorship keywords)
+    valid_visa = (~df['needs_sponsorship']) | (df['needs_sponsorship'] & has_sponsorship_mention)
+    
+    # 4. Domain Focus
+    fin_kws = ['fintech', 'bank', 'financ', 'payment', 'trading', 'quant', 'risk', 'credit', 'wealth', 'data', 'tech']
     has_fin = companies.str.contains('|'.join(fin_kws), na=False) | descs.str.contains('|'.join(fin_kws), na=False)
     
-    df_filtered = df[has_intern & has_fin].copy()
+    df_filtered = df[is_not_na & has_intern & valid_visa & has_fin].copy()
     print(f"Local filter reduced jobs from {len(df)} to {len(df_filtered)}.")
     return df_filtered
 
 def batch_ai_evaluate(df):
     valid_indices = []
-    batch_size = 45 # Mega-batching to drastically reduce total daily requests
+    batch_size = 40 
     
     for i in range(0, len(df), batch_size):
         batch_df = df.iloc[i:i+batch_size]
         
         prompt = "Evaluate these job postings based on the following strict criteria:\n"
-        prompt += "1. Domain: Must be strictly Fintech, Banking, or Financial Risk.\n"
-        prompt += "2. Role Type: Must be an Internship, Stage, Co-op, or Working Student.\n"
+        prompt += "1. Domain: Must be relevant to Analytics, Data Engineering, API Development, or Finance/Fintech.\n"
+        prompt += "2. Role Type: Must be an Internship, Stage, Co-op, or Working Student position.\n"
         prompt += "3. Sponsorship: If 'needs_sponsorship' is True, the description MUST explicitly mention visa sponsorship, relocation assistance, or welcoming international applicants.\n\n"
         prompt += "Return ONLY a valid JSON list of the exact 'id' strings that PASS ALL criteria. If none pass, return []. Do not include markdown formatting.\n\n"
         
@@ -135,7 +166,7 @@ def batch_ai_evaluate(df):
                 "title": row.get('title', ''),
                 "company": row.get('company', ''),
                 "needs_sponsorship": row.get('needs_sponsorship', False),
-                "description": str(row.get('description', ''))[:600] 
+                "description": str(row.get('description', ''))[:700] # Slight bump for better context
             })
             
         prompt += json.dumps(jobs_to_evaluate)
@@ -147,10 +178,10 @@ def batch_ai_evaluate(df):
             valid_indices.extend(passed_ids)
             print(f"Batch {i//batch_size + 1} processed successfully.")
         except json.JSONDecodeError:
-            print(f"Failed to parse JSON for Batch {i//batch_size + 1}.")
+            print(f"Failed to parse JSON for Batch {i//batch_size + 1}. Output was: {result_text[:50]}")
             
         if i + batch_size < len(df):
-            time.sleep(15)
+            time.sleep(16) # Ensures we stay under 15 RPM
 
     final_indices = []
     for v_id in valid_indices:
@@ -167,7 +198,7 @@ def send_email(df_filtered):
         return
 
     msg = EmailMessage()
-    msg['Subject'] = f"🚀 Daily Fintech Internship Alerts: {len(df_filtered)} Matches"
+    msg['Subject'] = f"🚀 Targeted Intern Alerts: {len(df_filtered)} Matches (Data/Fintech)"
     msg['From'] = EMAIL_SENDER
     msg['To'] = EMAIL_RECEIVER
 
@@ -178,7 +209,7 @@ def send_email(df_filtered):
     th { background-color: #f2f2f2; }
     a { color: #1a0dab; text-decoration: none; font-weight: bold; }
     </style></head><body>
-    <h2>Targeted Fintech Internships & Stages</h2>
+    <h2>Daily Target Matches</h2>
     <table><tr><th>Role</th><th>Company</th><th>Location</th><th>Link</th></tr>
     """
     for _, row in df_filtered.iterrows():
@@ -197,9 +228,9 @@ def send_email(df_filtered):
         print(f"Failed to send email: {e}")
 
 if __name__ == "__main__":
-    # HUMANIZATION JITTER: Prevents GitHub cron bans
-    sleep_time = random.randint(1, 1500) # Random delay between 1 second and 25 minutes
-    print(f"Jitter activated. Sleeping for {sleep_time} seconds before execution...")
+    # GitHub Action max runtime is 6 hours. Jitter capped at 15 mins to be safe.
+    sleep_time = random.randint(1, 900) 
+    print(f"Jitter activated. Sleeping for {sleep_time} seconds to bypass static bot detection...")
     time.sleep(sleep_time)
     
     print("Starting AI Job Agent...")
