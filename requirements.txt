@@ -1,4 +1,4 @@
-python-jobspy
 pandas
+jobspy
 google-genai
 python-dotenv
