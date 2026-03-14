@@ -21,37 +21,23 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
+# CONSOLIDATED TERMS: 4 High-Impact Queries
 SEARCH_TERMS = [
-    # Data & Analytics
     "Data Analyst Intern", 
-    "Data Science Working Student",
-    "Business Intelligence Intern",
-    "BI Stage",
-    # Engineering & Backend
     "Data Engineer Intern",
-    "API Engineer Intern",
-    "Backend Developer Intern",
-    # Finance/Quant
-    "Quantitative Developer Internship", 
-    "Risk Analyst Intern"
+    "API Backend Intern",
+    "Quantitative Intern"
 ]
 
+# CONSOLIDATED LOCATIONS: 7 Regions (Country-wide searches capture the cities automatically)
 LOCATIONS = [
-    # France (No sponsorship needed)
-    {"city": "Paris", "country": "france", "needs_sponsorship": False},
-    {"city": "Lyon", "country": "france", "needs_sponsorship": False},
-    # EU Hubs
-    {"city": "Amsterdam", "country": "netherlands", "needs_sponsorship": True},
-    {"city": "London", "country": "uk", "needs_sponsorship": True},
-    {"city": "Frankfurt", "country": "germany", "needs_sponsorship": True},
-    {"city": "Berlin", "country": "germany", "needs_sponsorship": True},
-    {"city": "Dublin", "country": "ireland", "needs_sponsorship": True},
-    {"city": "Luxembourg", "country": "luxembourg", "needs_sponsorship": True},
-    {"city": "Zurich", "country": "switzerland", "needs_sponsorship": True},
-    {"city": "Milan", "country": "italy", "needs_sponsorship": True},
-    # Asia Hubs
-    {"city": "Dubai", "country": "uae", "needs_sponsorship": True},
-    {"city": "Singapore", "country": "singapore", "needs_sponsorship": True}
+    {"region": "France", "country": "france", "needs_sponsorship": False},
+    {"region": "Netherlands", "country": "netherlands", "needs_sponsorship": True},
+    {"region": "United Kingdom", "country": "uk", "needs_sponsorship": True},
+    {"region": "Germany", "country": "germany", "needs_sponsorship": True},
+    {"region": "Switzerland", "country": "switzerland", "needs_sponsorship": True},
+    {"region": "United Arab Emirates", "country": "uae", "needs_sponsorship": True},
+    {"region": "Singapore", "country": "singapore", "needs_sponsorship": True}
 ]
 
 def safe_api_call(prompt, max_retries=3):
@@ -69,42 +55,39 @@ def safe_api_call(prompt, max_retries=3):
             print(f"API Attempt {attempt + 1} failed: {e}")
             if attempt < max_retries - 1:
                 backoff_time = 20 * (2 ** attempt) 
-                print(f"Backing off for {backoff_time} seconds...")
                 time.sleep(backoff_time)
             else:
-                print("Max retries reached. Failing gracefully.")
                 return "[]"
 
 def fetch_jobs():
     all_jobs = []
+    # 4 terms * 7 regions = 28 total scraping calls (Down from 108)
     for term in SEARCH_TERMS:
         for loc in LOCATIONS:
-            print(f"Scraping {term} in {loc['city']}...")
+            print(f"Scraping {term} in {loc['region']}...")
             try:
-                # Removed Glassdoor to prevent 403 timeout hangs
+                # Dropped Indeed for massive speed boost; Google aggregates it anyway
                 jobs = scrape_jobs(
-                    site_name=["linkedin", "indeed", "google"], 
-                    # Forcing the city name into the search bar counters US IP bias
-                    search_term=f"{term} {loc['city']}", 
-                    location=loc["city"],
+                    site_name=["linkedin", "google"], 
+                    search_term=f"{term} {loc['region']}", 
+                    location=loc["region"],
                     results_wanted=20, 
                     hours_old=24, 
                     country_relevant=loc["country"]
                 )
                 
                 if not jobs.empty:
-                    jobs['search_city'] = loc['city']
+                    jobs['search_region'] = loc['region']
                     jobs['needs_sponsorship'] = loc['needs_sponsorship']
                     all_jobs.append(jobs)
                     
             except Exception as e:
-                print(f"Error scraping {term} in {loc['city']}: {e}")
+                print(f"Error scraping {term} in {loc['region']}: {e}")
             
-            # ANTI-BAN MICRO-DELAY
-            delay = random.uniform(8.0, 16.0)
+            # AGGRESSIVE MICRO-DELAY: Safe enough for LinkedIn/Google without Indeed
+            delay = random.uniform(3.0, 6.0)
             time.sleep(delay)
                 
-    # Filter out empty dataframes before concatenating to avoid Pandas warnings
     valid_jobs = [j for j in all_jobs if not j.empty]
     
     if not valid_jobs:
@@ -150,7 +133,6 @@ def apply_hard_filters(df):
     df_filtered = df[is_not_na & has_intern & valid_visa & has_fin].copy()
     
     print(f"Local pre-filters dropped {initial_count - len(df_filtered)} irrelevant or US-based jobs.")
-    print(f"Sending {len(df_filtered)} highly targeted jobs to Gemini for final evaluation.")
     return df_filtered
 
 def batch_ai_evaluate(df):
@@ -183,9 +165,8 @@ def batch_ai_evaluate(df):
         try:
             passed_ids = json.loads(result_text)
             valid_indices.extend(passed_ids)
-            print(f"Batch {i//batch_size + 1} processed successfully.")
         except json.JSONDecodeError:
-            print(f"Failed to parse JSON for Batch {i//batch_size + 1}. Output was: {result_text[:50]}")
+            pass
             
         if i + batch_size < len(df):
             time.sleep(16) 
@@ -205,7 +186,7 @@ def send_email(df_filtered):
         return
 
     msg = EmailMessage()
-    msg['Subject'] = f"🚀 Targeted Intern Alerts: {len(df_filtered)} Matches (Data/Fintech)"
+    msg['Subject'] = f"🚀 Targeted Intern Alerts: {len(df_filtered)} Matches"
     msg['From'] = EMAIL_SENDER
     msg['To'] = EMAIL_RECEIVER
 
@@ -220,7 +201,7 @@ def send_email(df_filtered):
     <table><tr><th>Role</th><th>Company</th><th>Location</th><th>Link</th></tr>
     """
     for _, row in df_filtered.iterrows():
-        html_content += f"<tr><td>{row.get('title', 'N/A')}</td><td>{row.get('company', 'N/A')}</td><td>{row.get('location', row.get('search_city', 'N/A'))}</td><td><a href='{row.get('job_url', '#')}'>Apply Here</a></td></tr>"
+        html_content += f"<tr><td>{row.get('title', 'N/A')}</td><td>{row.get('company', 'N/A')}</td><td>{row.get('location', row.get('search_region', 'N/A'))}</td><td><a href='{row.get('job_url', '#')}'>Apply Here</a></td></tr>"
     html_content += "</table></body></html>"
     
     msg.set_content("Please enable HTML to view this email.")
@@ -235,8 +216,9 @@ def send_email(df_filtered):
         print(f"Failed to send email: {e}")
 
 if __name__ == "__main__":
-    sleep_time = random.randint(1, 600) 
-    print(f"Jitter activated. Sleeping for {sleep_time} seconds to bypass static bot detection...")
+    # Massive sleep removed. Max delay is now 15 seconds.
+    sleep_time = random.randint(1, 15) 
+    print(f"Jitter activated. Sleeping for {sleep_time} seconds...")
     time.sleep(sleep_time)
     
     print("Starting AI Job Agent...")
