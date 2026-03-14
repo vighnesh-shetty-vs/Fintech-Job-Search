@@ -106,10 +106,13 @@ def fetch_jobs():
             delay = random.uniform(8.0, 16.0)
             time.sleep(delay)
                 
-    if not all_jobs:
+    # Filter out any empty dataframes before concatenating
+    valid_jobs = [j for j in all_jobs if not j.empty]
+    
+    if not valid_jobs:
         return pd.DataFrame()
         
-    df = pd.concat(all_jobs, ignore_index=True)
+    df = pd.concat(valid_jobs, ignore_index=True)
     df = df.drop_duplicates(subset=['job_url'])
     return df
 
