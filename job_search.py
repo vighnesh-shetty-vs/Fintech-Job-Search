@@ -84,12 +84,12 @@ def fetch_jobs():
         for loc in LOCATIONS:
             print(f"Scraping {term} in {loc['city']}...")
             try:
-                # Added 'google' and 'glassdoor'. Google Jobs is highly resilient to datacenter IPs.
+                # Added 'google' Google Jobs is highly resilient to datacenter IPs.
                 jobs = scrape_jobs(
-                    site_name=["linkedin", "indeed", "glassdoor", "google"], 
+                    site_name=["linkedin", "indeed", "google"], 
                     search_term=term,
                     location=loc["city"],
-                    results_wanted=20, # Reduced slightly to avoid triggering anti-bot walls faster
+                    results_wanted=20, 
                     hours_old=24, 
                     country_relevant=loc["country"]
                 )
