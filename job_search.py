@@ -21,7 +21,6 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Broadened categories leveraging both BI/Data and Backend/API experience
 SEARCH_TERMS = [
     # Data & Analytics
     "Data Analyst Intern", 
@@ -37,8 +36,6 @@ SEARCH_TERMS = [
     "Risk Analyst Intern"
 ]
 
-# Expanded EU/Asia hubs. US/Canada implicitly ignored by omission, 
-# and explicitly filtered out in the hard filters below.
 LOCATIONS = [
     # France (No sponsorship needed)
     {"city": "Paris", "country": "france", "needs_sponsorship": False},
@@ -58,7 +55,7 @@ LOCATIONS = [
 ]
 
 def safe_api_call(prompt, max_retries=3):
-    """Executes API call with Exponential Backoff to respect 15 RPM limits."""
+    """Executes API call with Exponential Backoff to respect limits."""
     for attempt in range(max_retries):
         try:
             response = client.models.generate_content(
@@ -84,10 +81,11 @@ def fetch_jobs():
         for loc in LOCATIONS:
             print(f"Scraping {term} in {loc['city']}...")
             try:
-                # Added 'google' Google Jobs is highly resilient to datacenter IPs.
+                # Removed Glassdoor to prevent 403 timeout hangs
                 jobs = scrape_jobs(
                     site_name=["linkedin", "indeed", "google"], 
-                    search_term=term,
+                    # Forcing the city name into the search bar counters US IP bias
+                    search_term=f"{term} {loc['city']}", 
                     location=loc["city"],
                     results_wanted=20, 
                     hours_old=24, 
@@ -106,7 +104,7 @@ def fetch_jobs():
             delay = random.uniform(8.0, 16.0)
             time.sleep(delay)
                 
-    # Filter out any empty dataframes before concatenating
+    # Filter out empty dataframes before concatenating to avoid Pandas warnings
     valid_jobs = [j for j in all_jobs if not j.empty]
     
     if not valid_jobs:
@@ -117,36 +115,42 @@ def fetch_jobs():
     return df
 
 def apply_hard_filters(df):
-    """Aggressive local filtering to save API quota and enforce constraints."""
+    """Aggressive local filtering to eliminate US/CA jobs and non-internships."""
+    initial_count = len(df)
+    
     if 'emails_count' in df.columns:
         df = df[(df['emails_count'] < 10) | (df['emails_count'].isna())]
         
     titles = df['title'].astype(str).str.lower()
-    descs = df['description'].astype(str).str.lower()
     locations = df['location'].astype(str).str.lower()
-    companies = df['company'].astype(str).str.lower()
     
-    # 1. Strict Exclusions (No USA/Canada)
-    na_kws = ['usa', 'united states', 'canada', 'ny ', 'ca ', 'tx ']
-    is_not_na = ~locations.str.contains('|'.join(na_kws), na=False)
+    # 1. RUTHLESS NA EXCLUSION
+    na_kws = [
+        r'\busa?\b', r'\bunited states\b', r'\bcanada\b', 
+        r',\s*us\b', r',\s*ca\b', r'\bnew york\b', r'\bcalifornia\b', r'\btexas\b', r'\bohio\b'
+    ]
+    is_not_na = ~locations.str.contains('|'.join(na_kws), regex=True, na=False)
     
-    # 2. Intern/Stage Requirement
+    # 2. STRICT INTERN REQUIREMENT (Titles only)
     intern_kws = ['intern', 'stage', 'student', 'co-op', 'apprentice', 'alternance', 'graduate']
-    has_intern = titles.str.contains('|'.join(intern_kws), na=False) | descs.str.contains('|'.join(intern_kws), na=False)
+    has_intern = titles.str.contains('|'.join(intern_kws), na=False)
     
-    # 3. Local Sponsorship Pre-Filter (Saves API calls)
+    # 3. Local Sponsorship Pre-Filter
+    descs = df['description'].astype(str).str.lower()
     sponsorship_kws = ['visa', 'sponsor', 'relocat', 'international', 'global mobility', 'permit']
     has_sponsorship_mention = descs.str.contains('|'.join(sponsorship_kws), na=False)
     
-    # Keep if: It's France OR (It needs sponsorship AND mentions sponsorship keywords)
     valid_visa = (~df['needs_sponsorship']) | (df['needs_sponsorship'] & has_sponsorship_mention)
     
-    # 4. Domain Focus
-    fin_kws = ['fintech', 'bank', 'financ', 'payment', 'trading', 'quant', 'risk', 'credit', 'wealth', 'data', 'tech']
-    has_fin = companies.str.contains('|'.join(fin_kws), na=False) | descs.str.contains('|'.join(fin_kws), na=False)
+    # 4. Domain Pre-Filter 
+    companies = df['company'].astype(str).str.lower()
+    fin_kws = ['fintech', 'bank', 'financ', 'payment', 'trading', 'quant', 'risk', 'credit', 'wealth', 'data', 'analytics']
+    has_fin = companies.str.contains('|'.join(fin_kws), na=False) | titles.str.contains('|'.join(fin_kws), na=False)
     
     df_filtered = df[is_not_na & has_intern & valid_visa & has_fin].copy()
-    print(f"Local filter reduced jobs from {len(df)} to {len(df_filtered)}.")
+    
+    print(f"Local pre-filters dropped {initial_count - len(df_filtered)} irrelevant or US-based jobs.")
+    print(f"Sending {len(df_filtered)} highly targeted jobs to Gemini for final evaluation.")
     return df_filtered
 
 def batch_ai_evaluate(df):
@@ -169,7 +173,7 @@ def batch_ai_evaluate(df):
                 "title": row.get('title', ''),
                 "company": row.get('company', ''),
                 "needs_sponsorship": row.get('needs_sponsorship', False),
-                "description": str(row.get('description', ''))[:700] # Slight bump for better context
+                "description": str(row.get('description', ''))[:700] 
             })
             
         prompt += json.dumps(jobs_to_evaluate)
@@ -184,7 +188,7 @@ def batch_ai_evaluate(df):
             print(f"Failed to parse JSON for Batch {i//batch_size + 1}. Output was: {result_text[:50]}")
             
         if i + batch_size < len(df):
-            time.sleep(16) # Ensures we stay under 15 RPM
+            time.sleep(16) 
 
     final_indices = []
     for v_id in valid_indices:
@@ -231,8 +235,7 @@ def send_email(df_filtered):
         print(f"Failed to send email: {e}")
 
 if __name__ == "__main__":
-    # GitHub Action max runtime is 6 hours. Jitter capped at 15 mins to be safe.
-    sleep_time = random.randint(1, 900) 
+    sleep_time = random.randint(1, 600) 
     print(f"Jitter activated. Sleeping for {sleep_time} seconds to bypass static bot detection...")
     time.sleep(sleep_time)
     
