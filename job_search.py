@@ -118,19 +118,15 @@ def apply_hard_filters(df):
     intern_kws = ['intern', 'stage', 'student', 'co-op', 'apprentice', 'alternance', 'graduate']
     has_intern = titles.str.contains('|'.join(intern_kws), na=False)
     
-    # 3. Local Sponsorship Pre-Filter
-    descs = df['description'].astype(str).str.lower()
-    sponsorship_kws = ['visa', 'sponsor', 'relocat', 'international', 'global mobility', 'permit']
-    has_sponsorship_mention = descs.str.contains('|'.join(sponsorship_kws), na=False)
-    
-    valid_visa = (~df['needs_sponsorship']) | (df['needs_sponsorship'] & has_sponsorship_mention)
-    
-    # 4. Domain Pre-Filter 
+    # 3. Domain Pre-Filter 
     companies = df['company'].astype(str).str.lower()
     fin_kws = ['fintech', 'bank', 'financ', 'payment', 'trading', 'quant', 'risk', 'credit', 'wealth', 'data', 'analytics']
     has_fin = companies.str.contains('|'.join(fin_kws), na=False) | titles.str.contains('|'.join(fin_kws), na=False)
     
-    df_filtered = df[is_not_na & has_intern & valid_visa & has_fin].copy()
+    # NOTE: The hard sponsorship filter has been removed here to prevent dropping European jobs.
+    # We will let the AI handle the sponsorship and language evaluation.
+    
+    df_filtered = df[is_not_na & has_intern & has_fin].copy()
     
     print(f"Local pre-filters dropped {initial_count - len(df_filtered)} irrelevant or US-based jobs.")
     return df_filtered
@@ -142,10 +138,12 @@ def batch_ai_evaluate(df):
     for i in range(0, len(df), batch_size):
         batch_df = df.iloc[i:i+batch_size]
         
+        # UPDATED PROMPT: Added Language constraint and softened sponsorship logic
         prompt = "Evaluate these job postings based on the following strict criteria:\n"
-        prompt += "1. Domain: Must be relevant to Analytics, Data Engineering, API Development, or Finance/Fintech.\n"
-        prompt += "2. Role Type: Must be an Internship, Stage, Co-op, or Working Student position.\n"
-        prompt += "3. Sponsorship: If 'needs_sponsorship' is True, the description MUST explicitly mention visa sponsorship, relocation assistance, or welcoming international applicants.\n\n"
+        prompt += "1. Language: The job description MUST be written primarily in English. Reject it if it is written in French, German, Dutch, or any other language.\n"
+        prompt += "2. Domain: Must be relevant to Analytics, Data Engineering, API Development, or Finance/Fintech.\n"
+        prompt += "3. Role Type: Must be an Internship, Stage, Co-op, or Working Student position.\n"
+        prompt += "4. Sponsorship: If 'needs_sponsorship' is True, reject the job ONLY IF it explicitly states they do NOT sponsor visas. Otherwise, keep it.\n\n"
         prompt += "Return ONLY a valid JSON list of the exact 'id' strings that PASS ALL criteria. If none pass, return []. Do not include markdown formatting.\n\n"
         
         jobs_to_evaluate = []
