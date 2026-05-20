@@ -29,7 +29,7 @@ SEARCH_TERMS = [
     "Quantitative Intern"
 ]
 
-# CONSOLIDATED LOCATIONS: 7 Regions (Country-wide searches capture the cities automatically)
+# CONSOLIDATED LOCATIONS: 11 Regions 
 LOCATIONS = [
     {"region": "France", "country": "france", "needs_sponsorship": False},
     {"region": "Netherlands", "country": "netherlands", "needs_sponsorship": True},
@@ -37,7 +37,12 @@ LOCATIONS = [
     {"region": "Germany", "country": "germany", "needs_sponsorship": True},
     {"region": "Switzerland", "country": "switzerland", "needs_sponsorship": True},
     {"region": "United Arab Emirates", "country": "uae", "needs_sponsorship": True},
-    {"region": "Singapore", "country": "singapore", "needs_sponsorship": True}
+    {"region": "Singapore", "country": "singapore", "needs_sponsorship": True},
+    # --- NEW REGIONS ---
+    {"region": "Sweden", "country": "sweden", "needs_sponsorship": True},
+    {"region": "Denmark", "country": "denmark", "needs_sponsorship": True},
+    {"region": "Poland", "country": "poland", "needs_sponsorship": True},
+    {"region": "Czech Republic", "country": "czechia", "needs_sponsorship": True}
 ]
 
 def safe_api_call(prompt, max_retries=3):
@@ -61,14 +66,20 @@ def safe_api_call(prompt, max_retries=3):
 
 def fetch_jobs():
     all_jobs = []
-    # 4 terms * 7 regions = 28 total scraping calls (Down from 108)
+    
     for term in SEARCH_TERMS:
         for loc in LOCATIONS:
             print(f"Scraping {term} in {loc['region']}...")
+            
+            # Conditionally expand portals for France
+            target_sites = ["linkedin", "google"]
+            if loc["region"] == "France":
+                # Add Glassdoor and Indeed specifically to capture the local French market
+                target_sites.extend(["glassdoor", "indeed"])
+                
             try:
-                # Dropped Indeed for massive speed boost; Google aggregates it anyway
                 jobs = scrape_jobs(
-                    site_name=["linkedin", "google"], 
+                    site_name=target_sites, 
                     search_term=f"{term} {loc['region']}", 
                     location=loc["region"],
                     results_wanted=20, 
@@ -84,7 +95,6 @@ def fetch_jobs():
             except Exception as e:
                 print(f"Error scraping {term} in {loc['region']}: {e}")
             
-            # AGGRESSIVE MICRO-DELAY: Safe enough for LinkedIn/Google without Indeed
             delay = random.uniform(3.0, 6.0)
             time.sleep(delay)
                 
